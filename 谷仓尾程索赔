@@ -1,0 +1,158 @@
+/* =====================================================================
+ * 谷仓尾程索赔时限查询（加拿大 / 英国）
+ * ===================================================================== */
+const $ = id => document.getElementById(id);
+const DAY = 86400000;
+
+const parseDate = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+const fmt = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const addDays = (d, n) => { const r = new Date(d); r.setDate(r.getDate() + n); return r; };
+const addWorkdays = (d, n) => {
+  const r = new Date(d); let c = 0;
+  while (c < n) { r.setDate(r.getDate() + 1); const w = r.getDay(); if (w !== 0 && w !== 6) c++; }
+  return r;
+};
+const today = () => { const t = new Date(); return new Date(t.getFullYear(), t.getMonth(), t.getDate()); };
+
+const DATA = window.CLAIM_DATA || [];
+
+/* ---------- 下拉联动 ---------- */
+function initSelects() {
+  $('ver').textContent = window.CLAIM_DATA_VERSION || '—';
+  const countries = [...new Set(DATA.map(d => d.country))];
+  $('country').innerHTML = countries.map(c => `<option>${c}</option>`).join('');
+  $('country').addEventListener('change', fillChannels);
+  $('channel').addEventListener('change', () => { fillProducts(); fillTypes(); });
+  fillChannels();
+}
+
+function fillChannels() {
+  const c = $('country').value;
+  const chs = [...new Set(DATA.filter(d => d.country === c).map(d => d.channel))];
+  $('channel').innerHTML = chs.map(x => `<option>${x}</option>`).join('');
+  fillProducts();
+  fillTypes();
+}
+
+function findRecord() {
+  return DATA.find(d => d.country === $('country').value && d.channel === $('channel').value);
+}
+
+function fillProducts() {
+  const rec = findRecord();
+  if (!rec) { $('product').innerHTML = '<option>—</option>'; return; }
+  $('product').innerHTML = rec.products.length
+    ? rec.products.map(p => `<option>${p}</option>`).join('')
+    : '<option>—</option>';
+}
+
+function fillTypes() {
+  const rec = findRecord();
+  if (!rec) { $('type').innerHTML = '<option>—</option>'; return; }
+  $('type').innerHTML = rec.types.map(t => `<option>${t.name}</option>`).join('');
+  syncDateInputs();
+}
+
+/* 根据所选类型提示该填哪个日期 */
+function syncDateInputs() {
+  const rec = findRecord();
+  if (!rec) return;
+  const t = rec.types.find(x => x.name === $('type').value);
+  if (!t) return;
+  const needSign = t.base === 'sign';
+  $('shipDate').style.borderColor = needSign ? '#d1d5db' : '#2563eb';
+  $('signDate').style.borderColor = needSign ? '#2563eb' : '#d1d5db';
+}
+document.addEventListener('change', e => {
+  if (e.target.id === 'type') syncDateInputs();
+});
+
+/* ---------- 查询主逻辑 ---------- */
+function query() {
+  const rec = findRecord();
+  if (!rec) return render('<div class="empty">未找到该渠道的索赔规则</div>');
+
+  const t = rec.types.find(x => x.name === $('type').value);
+  if (!t) return render('<div class="empty">该渠道不支持此索赔类型</div>');
+
+  const baseLabel = t.base === 'ship' ? '发货日期' : '签收日期';
+  const baseInput = t.base === 'ship' ? $('shipDate').value : $('signDate').value;
+  if (!baseInput) {
+    return render(`<div class="empty">请填写${baseLabel}</div>`);
+  }
+
+  const baseDate = parseDate(baseInput);
+  const add = t.unit === 'wd' ? addWorkdays : addDays;
+  const unitLabel = t.unit === 'wd' ? '工作日' : '自然日';
+
+  const startDate = t.from ? add(baseDate, t.from) : baseDate;
+  const endDate = t.to != null ? add(baseDate, t.to) : null;
+  const now = today();
+
+  let badge, desc;
+  if (endDate && now > endDate) {
+    badge = '<span class="badge late">已超期</span>';
+    desc = `索赔时限已于 <b>${fmt(endDate)}</b> 截止，已超出 <b>${Math.round((now - endDate) / DAY)}</b> 天。`;
+  } else if (now < startDate) {
+    badge = '<span class="badge early">未到申请窗口</span>';
+    desc = `需等到 <b>${fmt(startDate)}</b> 之后才可提交，当前距窗口开启还有 <b>${Math.round((startDate - now) / DAY)}</b> 天。`;
+  } else {
+    badge = '<span class="badge ok">仍在索赔时限内</span>';
+    desc = endDate
+      ? `剩余 <b>${Math.round((endDate - now) / DAY)}</b> 天（含今日）。`
+      : '该类型无客户申请时限上限。';
+  }
+
+  const materials = (t.materials && t.materials.length) ? t.materials : (rec.materials || []);
+  const notes = [rec.notes, t.notes].filter(Boolean).join('\n\n');
+  const fileNaming = t.fileNaming || rec.fileNaming || '见材料说明';
+
+  render(`
+    <div class="card">
+      <div>
+        ${badge}
+        <span class="tracktag">${$('tracking').value.trim() || '未填单号'}</span>
+      </div>
+      <div class="kv">
+        <div class="item"><div class="k">国家 / 渠道</div><div class="v">${rec.country} · ${rec.channel}</div></div>
+        <div class="item"><div class="k">物流产品</div><div class="v">${$('product').value || '—'}</div></div>
+        <div class="item"><div class="k">索赔类型</div><div class="v">${t.name}</div></div>
+        <div class="item"><div class="k">计算基准</div><div class="v">${baseLabel}：${baseInput}（按${unitLabel}）</div></div>
+        <div class="item"><div class="k">申请窗口</div><div class="v">${fmt(startDate)} ~ ${endDate ? fmt(endDate) : '无上限'}</div></div>
+        <div class="item"><div class="k">索赔截止日</div><div class="v">${endDate ? fmt(endDate) : '—'}</div></div>
+        <div class="item"><div class="k">金额上限 / 币种</div><div class="v">${rec.amount} ${rec.currency}</div></div>
+        <div class="item"><div class="k">服务商参考回复时效</div><div class="v">${rec.response}</div></div>
+        <div class="item"><div class="k">申请条件</div><div class="v">${t.condition}</div></div>
+      </div>
+      <div class="note" style="margin-top:12px">${desc}</div>
+
+      <h3>需提交材料</h3>
+      <ul>${materials.map(m => `<li>${m}</li>`).join('') || '<li>无</li>'}</ul>
+
+      <h3>文件命名建议</h3>
+      <div class="note">${fileNaming}</div>
+
+      <h3>补充说明</h3>
+      <div class="note warn">${notes || '无'}</div>
+    </div>
+  `);
+}
+
+function render(html) { $('result').innerHTML = html; }
+
+/* ---------- 启动 ---------- */
+document.addEventListener('DOMContentLoaded', () => {
+  initSelects();
+  $('btn').addEventListener('click', query);
+  $('reset').addEventListener('click', () => {
+    $('tracking').value = '';
+    $('shipDate').value = '';
+    $('signDate').value = '';
+    render('');
+  });
+  $('todayBtn').addEventListener('click', () => {
+    const d = fmt(today());
+    if (!$('shipDate').value) $('shipDate').value = d;
+    if (!$('signDate').value) $('signDate').value = d;
+  });
+});
